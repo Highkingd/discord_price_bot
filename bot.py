@@ -488,5 +488,5 @@ async def on_guild_remove(guild):
         if admin_channel:
             await admin_channel.send(embed=embed)
 
-print(">>> Bot đã sẵn sàng, đang khởi động...")
+print(">>> Bot đã sẵn sàng, đang khởi động...") j
 bot.run(TOKEN)
