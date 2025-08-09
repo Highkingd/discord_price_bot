@@ -31,12 +31,19 @@ class DonHang(discord.ui.Modal, title="Đặt đơn Cave Store"):
         ma_don = generate_order_id()
         
         # Thu thập thông tin chi tiết về khách hàng
+        roles = []
+        if interaction.guild:
+            # Get member object to access roles
+            member = await interaction.guild.fetch_member(user.id)
+            if member:
+                roles = [str(role.id) for role in member.roles]
+                
         customer_info = {
             "username": f"{user.name}#{user.discriminator}",
             "id": user.id,
             "created_at": user.created_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
             "avatar_url": str(user.avatar.url) if user.avatar else None,
-            "roles": [str(role.id) for role in interaction.user._roles] if hasattr(interaction.user, '_roles') else [],
+            "roles": roles,
             "is_bot": user.bot,
             "server": interaction.guild.name if interaction.guild else "Direct Message",
             "server_id": str(interaction.guild.id) if interaction.guild else None
