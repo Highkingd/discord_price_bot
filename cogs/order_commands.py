@@ -100,8 +100,52 @@ class DonHang(discord.ui.Modal, title="Đặt đơn Cave Store"):
                 await ch.send(embed=embed)
             else:
                 log(f"⚠️ Không tìm thấy kênh {cid}")
+        
+        # Tạo embed thông báo chi tiết cho khách hàng
+        customer_embed = discord.Embed(
+            title="🛍️ Chi tiết đơn hàng của bạn",
+            description=f"Cảm ơn bạn đã đặt đơn! Dưới đây là thông tin chi tiết:",
+            color=0x2ecc71
+        )
+        customer_embed.add_field(name="📦 Mã đơn", value=f"`{ma_don}`", inline=True)
+        customer_embed.add_field(name="📋 Hình thức", value=self.hinh_thuc.value, inline=True)
+        if self.loai.value: customer_embed.add_field(name="🏷️ Loại", value=self.loai.value, inline=True)
+        if self.so_luong.value: customer_embed.add_field(name="🔢 Số lượng", value=self.so_luong.value, inline=True)
+        if self.ghi_chu.value: customer_embed.add_field(name="📝 Ghi chú", value=self.ghi_chu.value, inline=False)
+        
+        # Thêm thông tin trạng thái và hướng dẫn
+        customer_embed.add_field(
+            name="ℹ️ Trạng thái",
+            value="⏳ Đơn của bạn đang chờ duyệt",
+            inline=False
+        )
+        customer_embed.add_field(
+            name="📌 Lưu ý",
+            value="• Sử dụng `/trangthai " + ma_don + "` để kiểm tra trạng thái đơn\n"
+                  "• Sử dụng `/huydon " + ma_don + "` nếu muốn hủy đơn (chỉ khi chưa duyệt)\n"
+                  "• Bạn sẽ nhận được thông báo khi đơn được duyệt",
+            inline=False
+        )
+        customer_embed.set_footer(text=f"Thời gian đặt: {local_time.strftime('%d/%m/%Y %H:%M:%S')} ({tz_name})")
+
+        # Gửi thông báo cho khách hàng
+        try:
+            await user.send(embed=customer_embed)
+        except Exception as e:
+            log(f"⚠️ Không thể gửi DM cho khách hàng {user.id}: {str(e)}")
+            await interaction.response.send_message(
+                f"✅ Đã gửi đơn `{ma_don}`!\n"
+                "⚠️ Không thể gửi thông báo qua DM. Vui lòng bật DM để nhận thông báo.",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                f"✅ Đã gửi đơn `{ma_don}`!\n"
+                "📨 Chi tiết đơn hàng đã được gửi qua tin nhắn riêng.",
+                ephemeral=True
+            )
+            
         log(f"[ĐƠN MỚI] {ma_don} từ {user}")
-        await interaction.response.send_message(f"✅ Đã gửi đơn `{ma_don}`!", ephemeral=True)
 
 class OrderCommands(commands.Cog):
     def __init__(self, bot):

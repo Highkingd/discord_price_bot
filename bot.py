@@ -183,6 +183,13 @@ async def setup_hook():
         await bot.load_extension("cogs.order_commands")
         print("[Setup] Đã tải order_commands thành công")
         
+        # Load AI chat commands
+        try:
+            await bot.load_extension("cogs.ai_chat")
+            print("[Setup] Đã tải ai_chat thành công")
+        except Exception as e:
+            print(f"[Setup] ❌ Lỗi khi tải ai_chat: {str(e)}")
+        
         print("[Setup] Đang đồng bộ lệnh...")
         guild = discord.Object(id=GUILD_ID)
         
