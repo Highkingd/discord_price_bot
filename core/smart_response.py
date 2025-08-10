@@ -13,16 +13,54 @@ import logging
 import nltk
 from nltk.tokenize import sent_tokenize
 from nltk.sentiment import SentimentIntensityAnalyzer
+import time
+import gc
+import weakref
+from functools import lru_cache
 
 class SmartResponseGenerator:
     def __init__(self):
-        self.model = SentenceTransformer('paraphrase-multilingual-mpnet-base-v2')
-        self.vectorizer = TfidfVectorizer()
-        self.sentiment_analyzer = SentimentIntensityAnalyzer()
-        self.context_history = defaultdict(list)  # user_id: [contexts]
-        self.max_context_history = 10
+        # Lazy loading của model để tiết kiệm RAM
+        self._model = None
+        self._vectorizer = None
+        self._sentiment_analyzer = None
+        
+        # Sử dụng LRU Cache cho context history
+        self.context_history = {}
+        self.max_context_history = 5  # Giảm số lượng context lưu trữ
+        self.max_users = 100  # Giới hạn số lượng user được lưu context
+        
+        # Efficient data storage
         self.data_file = "data/smart_responses.json"
-        self.data = self.load_data()
+        self._data = None  # Lazy loading
+        self._last_data_load = 0
+        self.data_reload_interval = 300  # 5 phút reload data một lần
+        
+    @property
+    def model(self):
+        if self._model is None:
+            self._model = SentenceTransformer('paraphrase-multilingual-mpnet-base-v2')
+        return self._model
+        
+    @property
+    def vectorizer(self):
+        if self._vectorizer is None:
+            self._vectorizer = TfidfVectorizer()
+        return self._vectorizer
+        
+    @property
+    def sentiment_analyzer(self):
+        if self._sentiment_analyzer is None:
+            self._sentiment_analyzer = SentimentIntensityAnalyzer()
+        return self._sentiment_analyzer
+        
+    @property
+    def data(self):
+        current_time = time.time()
+        if self._data is None or (current_time - self._last_data_load) > self.data_reload_interval:
+            self._data = self.load_data()
+            self._last_data_load = current_time
+        return self._data
         self.setup_logger()
         
         # Từ điển phong cách và cảm xúc
@@ -251,28 +289,70 @@ class SmartResponseGenerator:
         
         return full_response.strip()
 
+    @lru_cache(maxsize=1000)
+    def get_semantic_similarity_cached(self, text1: str, text2: str) -> float:
+        """Cached version of semantic similarity"""
+        return self.get_semantic_similarity(text1, text2)
+
+    def cleanup_old_contexts(self):
+        """Cleanup old context histories"""
+        if len(self.context_history) > self.max_users:
+            # Remove context history for least recently used users
+            sorted_users = sorted(
+                self.context_history.items(),
+                key=lambda x: x[1][-1].get('timestamp', 0) if x[1] else 0
+            )
+            for user_id, _ in sorted_users[:-self.max_users]:
+                del self.context_history[user_id]
+
     def find_best_response(self,
                           message: str,
                           user_id: str,
                           additional_data: Optional[Dict] = None) -> Tuple[str, float]:
-        """Tìm câu trả lời phù hợp nhất"""
+        """Tìm câu trả lời phù hợp nhất với memory optimization"""
+        # Cleanup old contexts periodically
+        self.cleanup_old_contexts()
+        
         # Phát hiện context
         context = self.detect_user_context(message, user_id)
         context['user_id'] = user_id
+        context['timestamp'] = time.time()
         
-        # Tính similarity với các câu hỏi đã lưu
-        similarities = []
-        for response_data in self.data['responses']:
-            similarity = self.get_semantic_similarity(
-                message,
-                response_data['question']
-            )
-            similarities.append((similarity, response_data))
+        # Tối ưu tìm kiếm câu trả lời
+        best_similarity = 0
+        best_response = None
+        
+        # Batch processing để giảm memory usage
+        batch_size = 50
+        responses = self.data['responses']
+        
+        for i in range(0, len(responses), batch_size):
+            batch = responses[i:i + batch_size]
             
-        # Sắp xếp theo độ tương đồng
-        similarities.sort(key=lambda x: x[0], reverse=True)
+            # Process similarity in batch
+            batch_similarities = [
+                (
+                    self.get_semantic_similarity_cached(message, resp['question']),
+                    resp
+                )
+                for resp in batch
+            ]
+            
+            # Update best match
+            batch_best = max(batch_similarities, key=lambda x: x[0])
+            if batch_best[0] > best_similarity:
+                best_similarity = batch_best[0]
+                best_response = batch_best[1]
+            
+            # Early stopping if we found a very good match
+            if best_similarity > 0.9:
+                break
+                
+            # Garbage collection for large batches
+            if i % (batch_size * 5) == 0:
+                gc.collect()
         
-        if not similarities or similarities[0][0] < 0.6:
+        if not best_response or best_similarity < 0.6:
             # Không tìm thấy câu trả lời phù hợp
             # Tạo câu trả lời dựa trên templates
             if additional_data:
@@ -284,6 +364,11 @@ class SmartResponseGenerator:
                             context,
                             additional_data
                         )
+                        
+                        # Clear cache periodically
+                        if random.random() < 0.1:  # 10% chance to clear cache
+                            self.get_semantic_similarity_cached.cache_clear()
+                            
                         return response, 0.5
                         
             # Fallback response
@@ -292,14 +377,17 @@ class SmartResponseGenerator:
             return response, 0.0
             
         # Tìm thấy câu trả lời phù hợp
-        best_match = similarities[0][1]
         response = self.generate_dynamic_response(
-            best_match['answer'],
+            best_response['answer'],
             context,
             additional_data
         )
         
-        return response, similarities[0][0]
+        # Memory optimization
+        del best_response
+        gc.collect()
+        
+        return response, best_similarity
 
     def learn_from_conversation(self,
                               messages: List[Dict],

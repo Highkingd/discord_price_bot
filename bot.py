@@ -80,6 +80,9 @@ from discord.ext import commands
 import json
 import logging
 from datetime import datetime
+import time
+import gc
+import psutil
 from core.smart_response import SmartResponseGenerator
 
 # Load config
@@ -119,8 +122,22 @@ class Bot(commands.Bot):
             intents=intents
         )
         
-        # Add smart response generator
+        # Smart response system with memory management
         self.response_generator = response_generator
+        self.response_times = {}  # Rate limiting
+        self.response_cooldown = 2  # Seconds between responses
+        self.max_message_length = 500  # Limit input length
+        
+        # Memory management
+        self.last_gc_time = time.time()
+        self.gc_interval = 300  # Run GC every 5 minutes
+        
+    async def cleanup_memory(self):
+        """Periodic memory cleanup"""
+        current_time = time.time()
+        if current_time - self.last_gc_time > self.gc_interval:
+            gc.collect()
+            self.last_gc_time = current_time
         
     def has_role(self, member: discord.Member, role_name: str) -> bool:
         """Kiểm tra xem thành viên có role không"""
