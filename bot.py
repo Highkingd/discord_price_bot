@@ -75,10 +75,26 @@ def requires_role(roles: Union[str, List[str]]):
         return wrapper
     return decorator
 
+import discord
+from discord.ext import commands
+import json
+import logging
+from datetime import datetime
+from core.smart_response import SmartResponseGenerator
+
 # Load config
-config = load_config()
-TOKEN = config["TOKEN"]
-GUILD_ID = int(config["GUILD_ID"])
+with open('config.json', 'r') as f:
+    config = json.load(f)
+
+# Setup logging
+logging.basicConfig(
+    filename='log.txt',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
+# Initialize smart response generator
+response_generator = SmartResponseGenerator()
 
 # Các role ID
 ROLES = {
@@ -92,15 +108,19 @@ intents = discord.Intents.all()  # Enable all intents
 intents.message_content = True
 intents.members = True
 
-class CaveStoreBot(commands.Bot):
+class Bot(commands.Bot):
     def __init__(self):
+        intents = discord.Intents.default()
+        intents.message_content = True
+        intents.members = True
+        
         super().__init__(
-            command_prefix=config.get("PREFIX", "!"),
-            intents=intents,
-            help_command=None
+            command_prefix='!',
+            intents=intents
         )
-        self.config = config
-        self.roles = ROLES
+        
+        # Add smart response generator
+        self.response_generator = response_generator
         
     def has_role(self, member: discord.Member, role_name: str) -> bool:
         """Kiểm tra xem thành viên có role không"""
