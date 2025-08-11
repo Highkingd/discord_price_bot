@@ -1,58 +1,42 @@
-import numpy as np
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sentence_transformers import SentenceTransformer
-import torch
 from typing import Dict, List, Optional, Tuple
 import random
 import re
 from datetime import datetime
 import json
 import os
-from collections import defaultdict
 import logging
-import nltk
-from nltk.tokenize import sent_tokenize
-from nltk.sentiment import SentimentIntensityAnalyzer
 import time
 import gc
-import weakref
+from collections import defaultdict
 from functools import lru_cache
 
 class SmartResponseGenerator:
     def __init__(self):
-        # Lazy loading của model để tiết kiệm RAM
-        self._model = None
-        self._vectorizer = None
-        self._sentiment_analyzer = None
-        
-        # Sử dụng LRU Cache cho context history
+        # Simple storage
         self.context_history = {}
-        self.max_context_history = 5  # Giảm số lượng context lưu trữ
-        self.max_users = 100  # Giới hạn số lượng user được lưu context
+        self.max_context_history = 5
+        self.max_users = 100
         
-        # Efficient data storage
+        # Response data
         self.data_file = "data/smart_responses.json"
-        self._data = None  # Lazy loading
+        self._data = None
         self._last_data_load = 0
-        self.data_reload_interval = 300  # 5 phút reload data một lần
+        self.data_reload_interval = 300
         
-    @property
-    def model(self):
-        if self._model is None:
-            self._model = SentenceTransformer('paraphrase-multilingual-mpnet-base-v2')
-        return self._model
+    def calculate_similarity(self, text1: str, text2: str) -> float:
+        """Calculate simple text similarity"""
+        # Convert to sets of words
+        words1 = set(text1.lower().split())
+        words2 = set(text2.lower().split())
         
-    @property
-    def vectorizer(self):
-        if self._vectorizer is None:
-            self._vectorizer = TfidfVectorizer()
-        return self._vectorizer
+        # Calculate Jaccard similarity
+        intersection = len(words1.intersection(words2))
+        union = len(words1.union(words2))
         
-    @property
-    def sentiment_analyzer(self):
-        if self._sentiment_analyzer is None:
-            self._sentiment_analyzer = SentimentIntensityAnalyzer()
-        return self._sentiment_analyzer
+        if union == 0:
+            return 0.0
+            
+        return intersection / union
         
     @property
     def data(self):
@@ -185,9 +169,6 @@ class SmartResponseGenerator:
 
     def add_response(self, question: str, answer: str, context: Dict = None):
         """Thêm cặp Q&A mới"""
-        # Tạo embedding cho câu hỏi
-        embedding = self.model.encode(question)
-        
         response_data = {
             'question': question,
             'answer': answer,
@@ -196,36 +177,30 @@ class SmartResponseGenerator:
         }
         
         self.data['responses'].append(response_data)
-        self.data['embeddings'][question] = embedding.tolist()
         
         if len(self.data['responses']) > 1000:  # Giới hạn số lượng
             self.data['responses'] = self.data['responses'][-1000:]
             
         self.save_data()
 
-    def get_semantic_similarity(self, text1: str, text2: str) -> float:
-        """Tính độ tương đồng ngữ nghĩa giữa hai câu"""
-        emb1 = self.model.encode(text1)
-        emb2 = self.model.encode(text2)
-        return torch.nn.functional.cosine_similarity(
-            torch.tensor(emb1).unsqueeze(0),
-            torch.tensor(emb2).unsqueeze(0)
-        ).item()
-
     def analyze_user_style(self, message: str) -> str:
         """Phân tích phong cách người dùng"""
         message = message.lower()
         
         # Kiểm tra độ formal
-        formal_indicators = len(re.findall(r'\b(xin|vui lòng|cảm ơn|kính|thưa)\b', message))
-        casual_indicators = len(re.findall(r'\b(hey|hi|ê|ơi|nhé|nha)\b', message))
+        formal_words = ['xin', 'vui lòng', 'cảm ơn', 'kính', 'thưa']
+        casual_words = ['hey', 'hi', 'ê', 'ơi', 'nhé', 'nha']
         
-        # Phân tích sentiment
-        sentiment = self.sentiment_analyzer.polarity_scores(message)
+        formal_count = sum(word in message for word in formal_words)
+        casual_count = sum(word in message for word in casual_words)
         
-        if formal_indicators > casual_indicators:
+        # Kiểm tra sentiment đơn giản
+        negative_words = ['không', 'chán', 'buồn', 'khó', 'tệ']
+        negative_count = sum(word in message for word in negative_words)
+        
+        if formal_count > casual_count:
             return 'formal'
-        elif sentiment['compound'] < -0.1:
+        elif negative_count > 1:
             return 'empathetic'
         else:
             return 'casual'
@@ -234,14 +209,19 @@ class SmartResponseGenerator:
         """Phát hiện context từ tin nhắn người dùng"""
         context = {
             'style': self.analyze_user_style(message),
-            'sentiment': self.sentiment_analyzer.polarity_scores(message)
+            'timestamp': time.time()
         }
         
         # Kiểm tra các trigger
+        message_lower = message.lower()
         for trigger_type, patterns in self.context_triggers.items():
-            if any(pattern in message.lower() for pattern in patterns):
+            if any(pattern in message_lower for pattern in patterns):
                 context['trigger'] = trigger_type
                 break
+                
+        # Kiểm tra và khởi tạo history nếu cần
+        if user_id not in self.context_history:
+            self.context_history[user_id] = []
                 
         # Thêm vào lịch sử context
         self.context_history[user_id].append(context)
@@ -290,9 +270,9 @@ class SmartResponseGenerator:
         return full_response.strip()
 
     @lru_cache(maxsize=1000)
-    def get_semantic_similarity_cached(self, text1: str, text2: str) -> float:
-        """Cached version of semantic similarity"""
-        return self.get_semantic_similarity(text1, text2)
+    def get_similarity_cached(self, text1: str, text2: str) -> float:
+        """Cached version of text similarity"""
+        return self.calculate_similarity(text1, text2)
 
     def cleanup_old_contexts(self):
         """Cleanup old context histories"""

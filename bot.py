@@ -2,208 +2,123 @@
 
 import os
 import sys
-import functools
-from typing import Callable, List, Union
-from datetime import datetime
-import pytz
-from datetime import datetime, timezone, timedelta
+import json
+import logging
+from datetime import datetime, timezone
+import discord
+from discord.ext import commands
+from discord import app_commands
+from core.config import load_config
+from core.permissions import requires_role, ROLES
 
 # Add current directory to Python path
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
-def convert_to_local_time(utc_time: datetime, timezone_str: str = 'Asia/Ho_Chi_Minh') -> tuple[datetime, str]:
-    """Chuyển đổi thời gian UTC sang múi giờ địa phương"""
-    try:
-        local_tz = pytz.timezone(timezone_str)
-        local_time = utc_time.replace(tzinfo=timezone.utc).astimezone(local_tz)
-        tz_name = local_time.tzname()
-        return local_time, tz_name
-    except Exception:
-        return utc_time, 'UTC'
+# Load config
+config = load_config()
+GUILD_ID = int(config.get("GUILD_ID", "0"))
 
-def format_time_remaining(deadline: datetime) -> str:
-    """Tính và định dạng thời gian còn lại"""
-    now = datetime.now(timezone.utc)
-    if not deadline.tzinfo:
-        deadline = deadline.replace(tzinfo=timezone.utc)
-    
-    remaining = deadline - now
-    
-    if remaining.total_seconds() <= 0:
-        return "Đã hết hạn"
-    
-    days = remaining.days
-    hours = remaining.seconds // 3600
-    minutes = (remaining.seconds % 3600) // 60
-    
-    parts = []
-    if days > 0:
-        parts.append(f"{days} ngày")
-    if hours > 0:
-        parts.append(f"{hours} giờ")
-    if minutes > 0:
-        parts.append(f"{minutes} phút")
-        
-    return "Còn " + " ".join(parts)
+# Set up logging
+def log(message):
+    print(message)
+    logging.info(message)
 
-import discord
-from discord.ext import commands
-from discord import app_commands
-from core.config import load_config
-from core.logger import log
-from core.orders import orders, save_orders, generate_order_id
-
-def requires_role(roles: Union[str, List[str]]):
-    """Decorator để kiểm tra role cho slash commands"""
-    if isinstance(roles, str):
-        roles = [roles]
-    
-    def decorator(func: Callable) -> Callable:
-        @functools.wraps(func)
-        async def wrapper(self, interaction: discord.Interaction, *args, **kwargs):
-            member = interaction.user
-            if not any(self.bot.has_role(member, role) for role in roles):
-                role_names = ", ".join(roles)
-                await interaction.response.send_message(
-                    f"❌ Bạn cần role {role_names} để sử dụng lệnh này.",
-                    ephemeral=True
-                )
-                return
-            return await func(self, interaction, *args, **kwargs)
-        return wrapper
-    return decorator
-
-import discord
-from discord.ext import commands
+import os
+import sys
 import json
 import logging
 from datetime import datetime
 import time
 import gc
 import psutil
-from core.smart_response import SmartResponseGenerator
+import discord
+from discord.ext import commands
+from core.ai_core import CaveStoreAI
 
-# Load config
-with open('config.json', 'r') as f:
-    config = json.load(f)
-
-# Setup logging
-logging.basicConfig(
-    filename='log.txt',
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-
-# Initialize smart response generator
-response_generator = SmartResponseGenerator()
-
-# Các role ID
-ROLES = {
-    "ADMIN": [1345365308462071891],
-    "MODERATOR": [1345678008073326592],
-    "WORKER": [1345364282539376742]
-}
-
-# Set up intents
-intents = discord.Intents.all()  # Enable all intents
-intents.message_content = True
-intents.members = True
-
-class Bot(commands.Bot):
+# Simple bot class focused on order management
+class CaveStoreBot(commands.Bot):
     def __init__(self):
-        intents = discord.Intents.default()
+        # Minimal intents
+        intents = discord.Intents.none()
         intents.message_content = True
-        intents.members = True
+        intents.guilds = True
         
         super().__init__(
             command_prefix='!',
-            intents=intents
+            intents=intents,
+            chunk_guilds_at_startup=False,
+            max_messages=None  # Disable message cache
         )
         
-        # Smart response system with memory management
-        self.response_generator = response_generator
-        self.response_times = {}  # Rate limiting
-        self.response_cooldown = 2  # Seconds between responses
-        self.max_message_length = 500  # Limit input length
-        
-        # Memory management
-        self.last_gc_time = time.time()
-        self.gc_interval = 300  # Run GC every 5 minutes
-        
-    async def cleanup_memory(self):
-        """Periodic memory cleanup"""
-        current_time = time.time()
-        if current_time - self.last_gc_time > self.gc_interval:
-            gc.collect()
-            self.last_gc_time = current_time
+        # Setup logging
+        logging.basicConfig(
+            filename='log.txt',
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s'
+        )
+        self.logger = logging.getLogger('CaveStoreBot')
         
     def has_role(self, member: discord.Member, role_name: str) -> bool:
-        """Kiểm tra xem thành viên có role không"""
-        role_ids = self.roles.get(role_name, [])
+        """Check if member has role"""
+        role_ids = ROLES.get(role_name, [])
         return any(role.id in role_ids for role in member.roles)
 
     def get_permission_level(self, member: discord.Member) -> str:
-        """Lấy cấp độ quyền cao nhất của thành viên"""
+        """Get highest permission level"""
         if self.has_role(member, "ADMIN"): return "ADMIN"
         if self.has_role(member, "MODERATOR"): return "MODERATOR"
         if self.has_role(member, "WORKER"): return "WORKER"
         return "ALL"
 
+# Create bot instance
 bot = CaveStoreBot()
-print(">>> Đã tạo bot, chuẩn bị khởi động...")
+
+# Load token
+TOKEN = config.get("TOKEN", "")
+if not TOKEN:
+    raise ValueError("Bot token not found in config.json")
+
+print(">>> Bot initialized, preparing to start...")
 
 
 @bot.event
 async def on_ready():
     try:
-        print(f"✅ Bot đã đăng nhập với tên: {bot.user.name}")
-        print(f"✅ Bot ID: {bot.user.id}")
-        print(f"✅ Server ID: {GUILD_ID}")
+        log(f"✅ Bot logged in as: {bot.user.name}")
         
-        # Print all servers the bot is in
-        guilds = bot.guilds
-        print(f"Bot đang ở trong {len(guilds)} server:")
-        for guild in guilds:
-            print(f"  - {guild.name} (ID: {guild.id})")
-            # Thông báo cho server gốc về các server khác đang dùng bot
-            if guild.id != GUILD_ID:
-                home_guild = bot.get_guild(GUILD_ID)
-                if home_guild:
+        # Essential info logging
+        guild_count = len(bot.guilds)
+        log(f"Bot is in {guild_count} servers")
+        
+        # Notify admin channel
+        try:
+            home_guild = bot.get_guild(GUILD_ID)
+            if home_guild and config.get("ADMIN_CHANNEL_ID"):
+                admin_channel = home_guild.get_channel(int(config["ADMIN_CHANNEL_ID"]))
+                if admin_channel:
                     embed = discord.Embed(
-                        title="🌐 Server đang sử dụng bot",
-                        description=f"Server: **{guild.name}**\nID: `{guild.id}`\nThành viên: {guild.member_count}",
+                        title="✅ Bot Ready",
+                        description=f"Active in {guild_count} servers",
                         color=0x00ff00
                     )
-                    embed.set_thumbnail(url=guild.icon.url if guild.icon else None)
-                    embed.add_field(name="Chủ server", value=f"{guild.owner.name} ({guild.owner.id})")
-                    # Gửi thông báo vào kênh admin
-                    admin_channel = home_guild.get_channel(int(config["ADMIN_CHANNEL_ID"]))
-                    if admin_channel:
-                        await admin_channel.send(embed=embed)
+                    await admin_channel.send(embed=embed)
+        except Exception as e:
+            log(f"Could not send startup notification: {e}")
             
-        # Print all registered commands
-        commands = bot.tree.get_commands()
-        print(f"Các lệnh đã đăng ký ({len(commands)}):")
-        for cmd in commands:
-            print(f"  /{cmd.name} - {cmd.description}")
+        # Start order monitoring
+        try:
+            from tasks.order_monitor import don_giam_sat
+            bot.loop.create_task(don_giam_sat(bot))
+            log("✅ Order monitoring started")
+        except Exception as e:
+            log(f"❌ Error starting order monitor: {e}")
             
     except Exception as e:
-        print(f"❌ Lỗi khi khởi động bot: {e}")
+        log(f"❌ Error during bot startup: {str(e)}")
         import traceback
         traceback.print_exc()
-        return
-        
-    log("Bot đã sẵn sàng.")
-    
-    # Start order monitoring task
-    try:
-        from tasks.order_monitor import don_giam_sat
-        bot.loop.create_task(don_giam_sat(bot))
-        print("✅ Đã khởi động giám sát đơn hàng")
-    except Exception as e:
-        print(f"❌ Lỗi khi khởi động giám sát: {e}")
 
 
 
@@ -214,53 +129,75 @@ async def on_ready():
 @bot.event
 async def setup_hook():
     try:
-        print("[Setup] Đang tải extensions...")
+        log("[Setup] Loading extensions...")
         
-        # Load order commands
-        await bot.load_extension("cogs.order_commands")
-        print("[Setup] Đã tải order_commands thành công")
+        # Load extensions
+        extensions = [
+            "cogs.order_commands",
+            "cogs.ai_chat"
+        ]
         
-        # Load AI chat commands
-        try:
-            await bot.load_extension("cogs.ai_chat")
-            print("[Setup] Đã tải ai_chat thành công")
-        except Exception as e:
-            print(f"[Setup] ❌ Lỗi khi tải ai_chat: {str(e)}")
+        for extension in extensions:
+            try:
+                await bot.load_extension(extension)
+                log(f"[Setup] Loaded {extension}")
+            except Exception as e:
+                log(f"[Setup] ❌ Error loading {extension}: {str(e)}")
         
-        print("[Setup] Đang đồng bộ lệnh...")
+        # Sync commands
+        log("[Setup] Syncing commands...")
         guild = discord.Object(id=GUILD_ID)
         
-        # Clear and sync commands
-        print("[Setup] Xóa lệnh cũ...")
+        # Clear old commands first
         bot.tree.clear_commands(guild=guild)
-        await bot.tree.sync(guild=None)  # Sync globally first
+        await bot.tree.sync(guild=None)  # Global sync
         
-        print("[Setup] Đồng bộ lệnh mới...")
+        # Sync new commands
         commands = await bot.tree.sync(guild=guild)
-        print(f"[Setup] Đã đồng bộ {len(commands)} lệnh cho server")
+        log(f"[Setup] Synced {len(commands)} commands")
         
-        # Show warning if no commands were synced
-        if len(commands) == 0:
-            print("⚠️ CẢNH BÁO: Không có lệnh nào được đồng bộ!")
-            print("👉 Kiểm tra:")
-            print("  1. Bot có quyền applications.commands")
-            print("  2. GUILD_ID đúng")
-            print("  3. Bot đã được mời với đủ scope")
-            print("  4. Cogs đã được tải đúng")
-            print("  5. Các intents đã được bật")
+        if not commands:
+            log("⚠️ WARNING: No commands were synced!")
+            log("👉 Check:")
+            log("  1. Bot has applications.commands scope")
+            log("  2. GUILD_ID is correct")
+            log("  3. Bot invite URL has proper scopes")
+            log("  4. Cogs loaded correctly")
+            log("  5. Required intents are enabled")
+            
     except Exception as e:
-        print(f"❌ Lỗi trong setup_hook: {e}")
+        log(f"❌ Error in setup_hook: {str(e)}")
         import traceback
         traceback.print_exc()
 
-# Error handler for slash commands
-@bot.tree.command(name="phanquyen", description="👑 Cập nhật quyền cho role (Admin)")
+# Error handlers
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.CommandOnCooldown):
+        await interaction.response.send_message(
+            f"⏳ Please wait {error.retry_after:.1f} seconds.",
+            ephemeral=True
+        )
+    elif isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message(
+            "⛔ You don't have permission to use this command!",
+            ephemeral=True
+        )
+    else:
+        log(f"Command error: {str(error)}")
+        await interaction.response.send_message(
+            "❌ An error occurred while executing the command.",
+            ephemeral=True
+        )
+
+# Admin Commands
+@bot.tree.command(name="phanquyen", description="👑 Update role permissions (Admin)")
 @app_commands.guild_only()
 @requires_role("ADMIN")
 @app_commands.describe(
-    loai="Loại quyền (ADMIN/MODERATOR/WORKER)",
-    role="Role Discord cần cấp quyền (ID hoặc @mention)",
-    thao_tac="Thêm hoặc xóa role khỏi danh sách quyền"
+    loai="Permission type (ADMIN/MODERATOR/WORKER)",
+    role="Discord role to update (ID or @mention)",
+    thao_tac="Add or remove role from permission list"
 )
 async def update_role_permission(
     interaction: discord.Interaction,
@@ -268,207 +205,224 @@ async def update_role_permission(
     role: discord.Role,
     thao_tac: str
 ):
-    """Cập nhật quyền cho role"""
+    """Update role permissions"""
     try:
-        # Kiểm tra loại quyền hợp lệ
+        # Validate permission type
         loai = loai.upper()
         if loai not in ROLES:
             return await interaction.response.send_message(
-                "❌ Loại quyền không hợp lệ. Sử dụng: ADMIN, MODERATOR hoặc WORKER",
+                "❌ Invalid permission type. Use: ADMIN, MODERATOR or WORKER",
                 ephemeral=True
             )
 
-        # Kiểm tra thao tác hợp lệ
+        # Validate action
         thao_tac = thao_tac.lower()
-        if thao_tac not in ["thêm", "them", "add", "xóa", "xoa", "remove"]:
+        if thao_tac not in ["add", "remove"]:
             return await interaction.response.send_message(
-                "❌ Thao tác không hợp lệ. Sử dụng: thêm/add hoặc xóa/remove",
+                "❌ Invalid action. Use: add or remove",
                 ephemeral=True
             )
 
-        # Thực hiện thao tác
-        is_add = thao_tac in ["thêm", "them", "add"]
+        # Perform update
+        is_add = thao_tac == "add"
         role_ids = ROLES[loai]
 
         if is_add:
             if role.id in role_ids:
                 return await interaction.response.send_message(
-                    f"❌ Role {role.name} đã có quyền {loai}",
+                    f"❌ Role {role.name} already has {loai} permission",
                     ephemeral=True
                 )
             role_ids.append(role.id)
-            action_text = "thêm vào"
+            action_text = "added to"
         else:
             if role.id not in role_ids:
                 return await interaction.response.send_message(
-                    f"❌ Role {role.name} không có quyền {loai}",
+                    f"❌ Role {role.name} doesn't have {loai} permission",
                     ephemeral=True
                 )
             role_ids.remove(role.id)
-            action_text = "xóa khỏi"
+            action_text = "removed from"
 
-        # Cập nhật lại roles trong bot
-        bot.roles = ROLES
-
-        # Tạo embed thông báo
+        # Create response embed
         embed = discord.Embed(
-            title="👑 Cập nhật quyền",
-            description=f"Đã {action_text} danh sách quyền",
+            title="👑 Permission Update",
+            description=f"Role has been {action_text} permission list",
             color=0x00ff00
         )
         embed.add_field(name="Role", value=f"{role.name} (`{role.id}`)", inline=True)
-        embed.add_field(name="Quyền", value=loai, inline=True)
-        embed.add_field(name="Thao tác", value=thao_tac, inline=True)
+        embed.add_field(name="Permission", value=loai, inline=True)
+        embed.add_field(name="Action", value=thao_tac, inline=True)
         embed.add_field(
-            name="Danh sách role có quyền " + loai, 
-            value="\n".join([f"<@&{rid}>" for rid in ROLES[loai]]) or "Không có",
+            name=f"Roles with {loai} permission", 
+            value="\n".join([f"<@&{rid}>" for rid in ROLES[loai]]) or "None",
             inline=False
         )
 
         await interaction.response.send_message(embed=embed)
+        log(f"[PERMS] {role.name} {action_text} {loai} by {interaction.user}")
 
     except Exception as e:
+        log(f"[ERROR] Permission update failed: {str(e)}")
         await interaction.response.send_message(
-            f"❌ Lỗi khi cập nhật quyền: {str(e)}",
+            "❌ Error updating permissions",
             ephemeral=True
         )
 
-@bot.tree.command(name="thongbao", description="📢 Gửi thông báo tới tất cả server (Admin)")
+@bot.tree.command(name="thongbao", description="📢 Send announcement to all servers (Admin)")
 @app_commands.guild_only()
 @requires_role("ADMIN")
 @app_commands.describe(
-    tieude="Tiêu đề thông báo",
-    noidung="Nội dung thông báo",
-    mau="Màu thông báo (default: blue, red, green, yellow)"
+    title="Announcement title",
+    content="Announcement content",
+    color="Color (blue/red/green/yellow)"
 )
-async def broadcast_command(
+async def broadcast(
     interaction: discord.Interaction, 
-    tieude: str,
-    noidung: str,
-    mau: str = "blue"
+    title: str,
+    content: str,
+    color: str = "blue"
 ):
-    """Gửi thông báo tới tất cả server đang sử dụng bot"""
+    """Send announcement to all servers using the bot"""
     await interaction.response.defer(ephemeral=True)
     
-    # Chuyển đổi màu
+    # Color mapping
     colors = {
         "blue": 0x3498db,
         "red": 0xe74c3c,
         "green": 0x2ecc71,
         "yellow": 0xf1c40f
     }
-    color = colors.get(mau.lower(), 0x3498db)
+    embed_color = colors.get(color.lower(), 0x3498db)
     
-    # Tạo embed thông báo
+    # Create announcement embed
     embed = discord.Embed(
-        title=f"📢 {tieude}",
-        description=noidung,
-        color=color,
+        title=f"📢 {title}",
+        description=content,
+        color=embed_color,
         timestamp=datetime.now()
     )
-    embed.set_footer(text=f"Từ: {interaction.guild.name}")
+    embed.set_footer(text=f"From: {interaction.guild.name}")
     
-    # Gửi thông báo tới tất cả server
+    # Send to all servers
     success = 0
     failed = 0
     
     for guild in bot.guilds:
         try:
-            # Tìm kênh system hoặc general hoặc kênh đầu tiên có thể gửi
+            # Find suitable channel
             channel = None
             for ch in guild.text_channels:
-                if ch.permissions_for(guild.me).send_messages:
-                    if "system" in ch.name.lower() or "thông-báo" in ch.name.lower():
-                        channel = ch
-                        break
+                if not ch.permissions_for(guild.me).send_messages:
+                    continue
+                    
+                if "system" in ch.name.lower() or "announcement" in ch.name.lower():
+                    channel = ch
+                    break
+                    
+                if not channel and ("general" in ch.name.lower() or "main" in ch.name.lower()):
+                    channel = ch
+                    
             if not channel:
-                for ch in guild.text_channels:
-                    if ch.permissions_for(guild.me).send_messages:
-                        if "general" in ch.name.lower() or "chung" in ch.name.lower():
-                            channel = ch
-                            break
-            if not channel:
-                for ch in guild.text_channels:
-                    if ch.permissions_for(guild.me).send_messages:
-                        channel = ch
-                        break
-                        
+                channel = next((ch for ch in guild.text_channels 
+                              if ch.permissions_for(guild.me).send_messages), None)
+                
             if channel:
                 await channel.send(embed=embed)
                 success += 1
             else:
                 failed += 1
-                log(f"[THÔNG BÁO] Không thể gửi tới {guild.name} - Không tìm thấy kênh phù hợp")
+                log(f"[BROADCAST] Cannot send to {guild.name} - No suitable channel")
         except Exception as e:
             failed += 1
-            log(f"[THÔNG BÁO] Lỗi khi gửi tới {guild.name}: {str(e)}")
+            log(f"[BROADCAST] Error sending to {guild.name}: {str(e)}")
     
-    # Báo cáo kết quả
+    # Report results
     await interaction.followup.send(
-        f"✅ Đã gửi thông báo tới {success} server\n"
-        f"❌ Thất bại: {failed} server",
+        f"✅ Sent to {success} servers\n"
+        f"❌ Failed: {failed} servers",
         ephemeral=True
     )
 
-@bot.tree.command(name="help", description="📚 Hiển thị danh sách lệnh và hướng dẫn")
+@bot.tree.command(name="help", description="📚 Xem hướng dẫn sử dụng")
 @app_commands.guild_only()
 async def help_command(interaction: discord.Interaction):
-    """Hiển thị danh sách lệnh và hướng dẫn sử dụng"""
+    """Hiển thị danh sách lệnh"""
     member = interaction.user
     permission_level = bot.get_permission_level(member)
     
     embed = discord.Embed(
         title="📚 Hướng dẫn sử dụng Cave Store Bot",
-        description="Danh sách các lệnh có sẵn theo quyền của bạn:",
+        description="Danh sách lệnh theo quyền hạn:",
         color=0x00ff00
     )
 
-    # Basic commands - everyone can use
+    # Basic commands
     basic_cmds = """
-`/donhang` - Mở form đặt đơn hàng mới
-`/trangthai` - Xem trạng thái đơn hàng
-`/huydon` - Huỷ đơn hàng của bạn (chỉ khi chưa duyệt)
-`/tinhgia` - Tính giá trị đơn hàng
-`/help` - Hiển thị hướng dẫn này
+`/donhang` - Đặt đơn hàng mới
+`/trangthai` - Xem trạng thái đơn
+`/huydon` - Hủy đơn hàng (trước khi duyệt)
+`/tinhgia` - Tính giá đơn hàng
+`/help` - Xem hướng dẫn này
 """
-    embed.add_field(name="🌟 Lệnh cơ bản", value=basic_cmds, inline=False)
+    embed.add_field(name="🌟 Lệnh cơ bản", value=basic_cmds.strip(), inline=False)
 
     # Worker commands
     if permission_level in ["WORKER", "MODERATOR", "ADMIN"]:
         worker_cmds = """
-`/nhancay` - Nhận đơn và chốt thời hạn
-`/hoanthanh` - Đánh dấu đơn đã hoàn thành
-`/suadon` - Chỉnh sửa ghi chú đơn
+`/nhancay` - Nhận đơn và đặt deadline
+`/hoanthanh` - Đánh dấu hoàn thành
 """
-        embed.add_field(name="💪 Lệnh cho Worker", value=worker_cmds, inline=False)
+        embed.add_field(name="💪 Lệnh Worker", value=worker_cmds.strip(), inline=False)
 
     # Moderator commands
     if permission_level in ["MODERATOR", "ADMIN"]:
         mod_cmds = """
-`/duyetdon` - Duyệt đơn hàng
-`/danhsachdon` - Xem danh sách đơn hàng
-`/thongke` - Xem thống kê đơn hàng
-`/giahan` - Gia hạn thời gian cho đơn
+`/duyetdon` - Duyệt đơn
+`/danhsachdon` - Xem danh sách đơn
+`/thongke` - Thống kê đơn hàng
 """
-        embed.add_field(name="🛡️ Lệnh cho Moderator", value=mod_cmds, inline=False)
+        embed.add_field(name="🛡️ Lệnh Moderator", value=mod_cmds.strip(), inline=False)
 
     # Admin commands
     if permission_level == "ADMIN":
         admin_cmds = """
-`/xoadon` - Xoá đơn hàng
-`/thongbao` - Gửi thông báo tới tất cả server
-`/phanquyen` - Cấp quyền cho role
+`/xoadon` - Xóa đơn hàng
+`/phanquyen` - Quản lý quyền
 """
-        embed.add_field(name="👑 Lệnh cho Admin", value=admin_cmds, inline=False)
+        embed.add_field(name="👑 Lệnh Admin", value=admin_cmds.strip(), inline=False)
 
-    # Add current role info
-    embed.add_field(
-        name="🎭 Quyền của bạn", 
-        value=f"Cấp độ quyền hiện tại: **{permission_level}**",
-        inline=False
-    )
+    # Permission level
+    embed.set_footer(text=f"Cấp độ quyền: {permission_level}")
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# Guild events
+@bot.event
+async def on_guild_join(guild):
+    """Event when bot joins a new server"""
+    log(f"[NEW SERVER] {guild.name} (ID: {guild.id})")
+    
+    # Simple notification
+    home_guild = bot.get_guild(GUILD_ID)
+    if home_guild and config.get("ADMIN_CHANNEL_ID"):
+        embed = discord.Embed(
+            title="✨ Server mới",
+            description=f"**{guild.name}**\nID: `{guild.id}`",
+            color=0x00ff00
+        )
+        admin_channel = home_guild.get_channel(int(config["ADMIN_CHANNEL_ID"]))
+        if admin_channel:
+            await admin_channel.send(embed=embed)
+
+@bot.event
+async def on_guild_remove(guild):
+    """Event when bot is removed"""
+    log(f"[LEAVE] {guild.name} (ID: {guild.id})")
+
+# Start bot
+log(">>> Starting bot...")
+bot.run(TOKEN)
 
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
